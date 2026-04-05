@@ -1,0 +1,530 @@
+#!/usr/bin/env python3
+"""构建并安装 SuperRightClick —— 基于 FIFinderSync 的 Finder 右键扩展。
+
+相比旧的 Automator Quick Action 方案，这份实现使用 Apple 官方的
+Finder Sync Extension API，菜单能同时出现在两种场景：
+  1. 右键选中的文件 / 文件夹
+  2. 右键 Finder 窗口的空白区域（旧方案无法覆盖）
+
+架构：
+  scripts/              9 个独立 bash 脚本，每个对应一个菜单项
+  src/ext/              Finder Sync extension Swift 源
+  src/host/             空壳宿主 app Swift 源（只为承载 appex）
+  build/                编译产物
+  ~/Applications/SuperRightClick.app   最终安装位置
+
+流程：
+  1. 把 make_*_script() 的输出写成 scripts/*.sh
+  2. 生成 Swift 源码（菜单 tuple 由 services 列表动态渲染）
+  3. swiftc 编译 host + extension
+  4. 生成两份 Info.plist
+  5. codesign --sign -（ad-hoc，本机使用足够）
+  6. 拷贝到 ~/Applications
+  7. pluginkit 注册 & 启用扩展
+  8. 清理旧 Automator 服务
+  9. 打开 "系统设置 → 隐私与安全 → 扩展 → 访达扩展"，提示用户勾选
+"""
+import plistlib
+import shutil
+import subprocess
+import zipfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+SCRIPTS_DIR = ROOT / "scripts"
+SRC_EXT = ROOT / "src" / "ext"
+SRC_HOST = ROOT / "src" / "host"
+BUILD_DIR = ROOT / "build"
+TEMPLATES_DIR = ROOT / "templates"
+BLANK_DOCX = TEMPLATES_DIR / "blank.docx"
+
+APP_NAME = "SuperRightClick"
+BUNDLE_ID_APP = "com.eli.superrightclick"
+BUNDLE_ID_EXT = "com.eli.superrightclick.FinderSync"
+EXT_CLASS_NAME = "FinderSyncExt"
+
+INSTALL_DIR = Path.home() / "Applications"
+APP_PATH_INSTALLED = INSTALL_DIR / f"{APP_NAME}.app"
+
+
+# ============================================================================
+# Part 1: Shell 脚本生成器（从旧 install.py 原样继承）
+# ============================================================================
+
+_LOG_HEAD = r'''#!/bin/zsh
+LOG="$HOME/Library/Logs/super-rightclick.log"
+exec >>"$LOG" 2>&1
+echo "=== $(date) [{tag}] argc=$# ==="
+'''
+
+
+def make_shell_script(ext, base, source=None):
+    """新建文件类：touch 一个空文件，或 cp 一份模板文件。"""
+    if source:
+        create_cmd = f'/bin/cp "{source}" "$target"'
+    else:
+        create_cmd = '/usr/bin/touch "$target"'
+    return _LOG_HEAD.format(tag=ext) + f'''printf 'arg: %s\\n' "$@"
+for dir in "$@"; do
+    name="{base}.{ext}"
+    i=1
+    while [ -e "$dir/$name" ]; do
+        name="{base} $i.{ext}"
+        i=$((i+1))
+    done
+    target="$dir/$name"
+    if {create_cmd}; then
+        echo "OK: $target"
+        /usr/bin/osascript -e "tell application \\"Finder\\" to update (POSIX file \\"$dir\\" as alias)"
+    else
+        echo "FAIL: $target"
+        /usr/bin/osascript -e "display notification \\"创建失败: $target\\" with title \\"New {ext} File\\""
+    fi
+done
+'''
+
+
+def make_dated_file_script(ext, source=None):
+    """新建以当日日期命名的文件（默认空文件，可选模板）。"""
+    if source:
+        create_cmd = f'/bin/cp "{source}" "$target"'
+    else:
+        create_cmd = '/usr/bin/touch "$target"'
+    return _LOG_HEAD.format(tag=f"dated-{ext}") + f'''for dir in "$@"; do
+    base="$(date +%Y-%m-%d)"
+    name="${{base}}.{ext}"
+    i=1
+    while [ -e "$dir/$name" ]; do
+        name="${{base}} ${{i}}.{ext}"
+        i=$((i+1))
+    done
+    target="$dir/$name"
+    if {create_cmd}; then
+        echo "OK: $target"
+        /usr/bin/osascript -e "tell application \\"Finder\\" to update (POSIX file \\"$dir\\" as alias)"
+    else
+        echo "FAIL: $target"
+    fi
+done
+'''
+
+
+def make_open_ghostty_script():
+    return _LOG_HEAD.format(tag="ghostty") + r'''for dir in "$@"; do
+    /usr/bin/open -a Ghostty "$dir" && echo "OK: $dir" || echo "FAIL: $dir"
+done
+'''
+
+
+def make_copy_path_script():
+    return _LOG_HEAD.format(tag="copy-path") + r'''tmp=$(/usr/bin/mktemp /tmp/sr_clip.XXXXXX)
+printf '%s' "$1" > "$tmp"
+shift
+for p in "$@"; do printf '\n%s' "$p" >> "$tmp"; done
+/usr/bin/osascript -e "set the clipboard to (read (POSIX file \"$tmp\") as «class utf8»)"
+/bin/rm -f "$tmp"
+/usr/bin/osascript -e "display notification \"已复制路径\" with title \"复制路径\""
+echo "OK: path(s) copied"
+'''
+
+
+# ============================================================================
+# Part 2: 空白 docx 模板
+# ============================================================================
+
+_CONTENT_TYPES = b'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>'''
+
+_RELS = b'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>'''
+
+_DOCUMENT_XML = b'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:body><w:p/></w:body>
+</w:document>'''
+
+
+def ensure_blank_docx():
+    TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+    if BLANK_DOCX.exists():
+        return BLANK_DOCX
+    with zipfile.ZipFile(BLANK_DOCX, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", _CONTENT_TYPES)
+        z.writestr("_rels/.rels", _RELS)
+        z.writestr("word/document.xml", _DOCUMENT_XML)
+    return BLANK_DOCX
+
+
+# ============================================================================
+# Part 3: 服务定义（菜单文案 → 脚本文件名 → 脚本内容）
+# ============================================================================
+
+def service_defs(docx_path):
+    # (菜单文案, 脚本文件名, 脚本内容, SF Symbol 名)
+    return [
+        ("新建 Markdown 文件", "new_md.sh",       make_dated_file_script("md"),                              "doc.text"),
+        ("新建文本文件",       "new_txt.sh",      make_shell_script("txt",  "未命名"),                       "doc.plaintext"),
+        ("新建 Word 文档",     "new_docx.sh",     make_shell_script("docx", "未命名", source=str(docx_path)), "doc.richtext"),
+        ("在 Ghostty 中打开",  "open_ghostty.sh", make_open_ghostty_script(),                                "terminal"),
+        ("复制路径",           "copy_path.sh",    make_copy_path_script(),                                   "doc.on.clipboard"),
+    ]
+
+
+# ============================================================================
+# Part 4: 写脚本文件
+# ============================================================================
+
+def write_scripts(services):
+    if SCRIPTS_DIR.exists():
+        shutil.rmtree(SCRIPTS_DIR)
+    SCRIPTS_DIR.mkdir(parents=True)
+    for _, filename, content, _ in services:
+        path = SCRIPTS_DIR / filename
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o755)
+    print(f"✓ 写入 {len(services)} 个 shell 脚本到 {SCRIPTS_DIR}")
+
+
+# ============================================================================
+# Part 5: 写 Swift 源码
+# ============================================================================
+
+def write_swift_sources(services):
+    for d in (SRC_EXT, SRC_HOST):
+        if d.exists():
+            shutil.rmtree(d)
+        d.mkdir(parents=True)
+
+    # 菜单项 tuple 列表（Swift 字面量）：(标题, 脚本文件名, SF Symbol 名)
+    menu_lines = ",\n        ".join(
+        f'("{title}", "{filename}", "{symbol}")'
+        for title, filename, _, symbol in services
+    )
+
+    ext_swift = f'''import Cocoa
+import FinderSync
+
+@objc({EXT_CLASS_NAME})
+class {EXT_CLASS_NAME}: FIFinderSync {{
+
+    private let services: [(String, String, String)] = [
+        {menu_lines}
+    ]
+
+    override init() {{
+        super.init()
+        // 监视根目录 → 菜单在任意文件夹可用
+        FIFinderSyncController.default().directoryURLs = [URL(fileURLWithPath: "/")]
+    }}
+
+    override func menu(for menuKind: FIMenuKind) -> NSMenu {{
+        let menu = NSMenu(title: "")
+
+        // 跨 XPC 时 NSImage 的 isTemplate 会丢，Finder 拿到图片只会原样画，
+        // 所以不能依赖 template 自动着色。自己检测当前主题，把 SF Symbol
+        // 用对应颜色（深色→白，浅色→黑）渲染成静态位图再塞进菜单项。
+        // menu(for:) 每次右键都会重跑，所以切主题也会即时生效。
+        let appearance = NSApp.effectiveAppearance
+        let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let tint: NSColor = isDark ? .white : .black
+
+        for (idx, (title, _, symbol)) in services.enumerated() {{
+            let item = NSMenuItem(
+                title: title,
+                action: #selector(runScript(_:)),
+                keyEquivalent: ""
+            )
+            item.tag = idx
+            if !symbol.isEmpty, let img = tintedSymbol(symbol, color: tint) {{
+                item.image = img
+            }}
+            menu.addItem(item)
+        }}
+        return menu
+    }}
+
+    private func tintedSymbol(_ name: String, color: NSColor) -> NSImage? {{
+        guard let sym = NSImage(systemSymbolName: name, accessibilityDescription: nil) else {{
+            return nil
+        }}
+        let size = NSSize(width: 16, height: 16)
+        let out = NSImage(size: size)
+        out.lockFocus()
+        let rect = NSRect(origin: .zero, size: size)
+        sym.draw(in: rect)
+        color.set()
+        rect.fill(using: .sourceAtop)
+        out.unlockFocus()
+        return out
+    }}
+
+    private func debugLog(_ msg: String) {{
+        NSLog("[SuperRightClick] \\(msg)")
+        let logPath = ("~/Library/Logs/super-rightclick-ext.log" as NSString)
+            .expandingTildeInPath
+        let line = "[\\(Date())] \\(msg)\\n"
+        if let data = line.data(using: .utf8) {{
+            if let fh = FileHandle(forWritingAtPath: logPath) {{
+                fh.seekToEndOfFile()
+                fh.write(data)
+                fh.closeFile()
+            }} else {{
+                try? data.write(to: URL(fileURLWithPath: logPath))
+            }}
+        }}
+    }}
+
+    @objc func runScript(_ sender: NSMenuItem) {{
+        debugLog("runScript fired: \\(sender.title) tag=\\(sender.tag)")
+        guard sender.tag >= 0 && sender.tag < services.count else {{
+            debugLog("tag out of range")
+            return
+        }}
+        let filename = services[sender.tag].1  // (title, filename, symbol)
+
+        var targets: [String] = []
+        if let selected = FIFinderSyncController.default().selectedItemURLs(),
+           !selected.isEmpty {{
+            targets = selected.map {{ $0.path }}
+        }} else if let target = FIFinderSyncController.default().targetedURL() {{
+            targets = [target.path]
+        }}
+        debugLog("targets: \\(targets)")
+
+        guard !targets.isEmpty else {{
+            debugLog("no target")
+            return
+        }}
+
+        do {{
+            let scriptsURL = try FileManager.default.url(
+                for: .applicationScriptsDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: true
+            )
+            let scriptURL = scriptsURL.appendingPathComponent(filename)
+            debugLog("scriptURL: \\(scriptURL.path)")
+            let task = try NSUserUnixTask(url: scriptURL)
+            task.execute(withArguments: targets) {{ [weak self] error in
+                if let error = error {{
+                    self?.debugLog("script error: \\(error)")
+                }} else {{
+                    self?.debugLog("script ok")
+                }}
+            }}
+        }} catch {{
+            debugLog("run failed: \\(error)")
+        }}
+    }}
+}}
+'''
+    (SRC_EXT / f"{EXT_CLASS_NAME}.swift").write_text(ext_swift, encoding="utf-8")
+
+    # 扩展二进制的 stub main —— 运行时不会被执行（链接器 -e 会把入口改成 _NSExtensionMain）
+    (SRC_EXT / "main.swift").write_text(
+        "import Foundation\n"
+        "// Unreachable. Real entry point is NSExtensionMain (set via linker -e).\n"
+        "exit(0)\n",
+        encoding="utf-8",
+    )
+
+    # 宿主 app —— 只是为了装载 appex；启动即退出
+    (SRC_HOST / "main.swift").write_text(
+        "import Cocoa\n"
+        "// Host exists only to contain the FinderSync extension bundle.\n"
+        "exit(0)\n",
+        encoding="utf-8",
+    )
+
+    print("✓ Swift 源码已生成")
+
+
+# ============================================================================
+# Part 6: 编译 + 打包 + 签名
+# ============================================================================
+
+def build_app():
+    if BUILD_DIR.exists():
+        shutil.rmtree(BUILD_DIR)
+    app = BUILD_DIR / f"{APP_NAME}.app"
+    contents = app / "Contents"
+    plugins = contents / "PlugIns"
+    appex = plugins / "FinderSync.appex"
+    (contents / "MacOS").mkdir(parents=True)
+    (appex / "Contents" / "MacOS").mkdir(parents=True)
+
+    # 1) 编译 host
+    subprocess.run([
+        "swiftc",
+        "-o", str(contents / "MacOS" / APP_NAME),
+        str(SRC_HOST / "main.swift"),
+    ], check=True)
+
+    # 2) 编译 extension —— 关键是链接器入口改成 _NSExtensionMain
+    #    必须显式 -module-name，否则 swiftc 默认用输出名 "FinderSync"，
+    #    与 Apple 的 FinderSync framework 同名，导致 import FinderSync 被忽略。
+    subprocess.run([
+        "swiftc",
+        "-module-name", "SuperRightClickExt",
+        "-o", str(appex / "Contents" / "MacOS" / "FinderSync"),
+        "-framework", "FinderSync",
+        "-framework", "AppKit",
+        "-framework", "Foundation",
+        "-Xlinker", "-e",
+        "-Xlinker", "_NSExtensionMain",
+        str(SRC_EXT / f"{EXT_CLASS_NAME}.swift"),
+        str(SRC_EXT / "main.swift"),
+    ], check=True)
+
+    # 3) Info.plist
+    host_info = {
+        "CFBundleExecutable": APP_NAME,
+        "CFBundleIdentifier": BUNDLE_ID_APP,
+        "CFBundleName": APP_NAME,
+        "CFBundleDisplayName": APP_NAME,
+        "CFBundlePackageType": "APPL",
+        "CFBundleShortVersionString": "1.0",
+        "CFBundleVersion": "1",
+        "LSMinimumSystemVersion": "11.0",
+        "LSUIElement": True,
+    }
+    with open(contents / "Info.plist", "wb") as f:
+        plistlib.dump(host_info, f)
+
+    ext_info = {
+        "CFBundleExecutable": "FinderSync",
+        "CFBundleIdentifier": BUNDLE_ID_EXT,
+        "CFBundleName": "FinderSync",
+        "CFBundleDisplayName": "SuperRightClick",
+        "CFBundlePackageType": "XPC!",
+        "CFBundleInfoDictionaryVersion": "6.0",
+        "CFBundleShortVersionString": "1.0",
+        "CFBundleVersion": "1",
+        "CFBundleSupportedPlatforms": ["MacOSX"],
+        "LSMinimumSystemVersion": "11.0",
+        "LSUIElement": True,
+        "NSPrincipalClass": "NSApplication",
+        "NSExtension": {
+            "NSExtensionAttributes": {},
+            "NSExtensionPointIdentifier": "com.apple.FinderSync",
+            "NSExtensionPrincipalClass": EXT_CLASS_NAME,
+        },
+    }
+    with open(appex / "Contents" / "Info.plist", "wb") as f:
+        plistlib.dump(ext_info, f)
+
+    # 4) 生成 entitlements —— Finder Sync extension 必须开启 sandbox
+    #    否则 pkd 会记录 "plug-ins must be sandboxed" 并拒绝注册。
+    ext_entitlements = {
+        "com.apple.security.app-sandbox": True,
+    }
+    host_entitlements = {
+        "com.apple.security.app-sandbox": True,
+    }
+    ext_ent_path = BUILD_DIR / "ext.entitlements"
+    host_ent_path = BUILD_DIR / "host.entitlements"
+    with open(ext_ent_path, "wb") as f:
+        plistlib.dump(ext_entitlements, f)
+    with open(host_ent_path, "wb") as f:
+        plistlib.dump(host_entitlements, f)
+
+    # 5) 签名：ad-hoc（"-"）+ entitlements。先签 appex 再签外层 app。
+    subprocess.run([
+        "codesign", "--force", "--sign", "-",
+        "--entitlements", str(ext_ent_path),
+        str(appex),
+    ], check=True)
+    subprocess.run([
+        "codesign", "--force", "--sign", "-",
+        "--entitlements", str(host_ent_path),
+        str(app),
+    ], check=True)
+    print(f"✓ 已构建并签名: {app}")
+    return app
+
+
+# ============================================================================
+# Part 7: 安装到 ~/Applications 并向 pluginkit 注册
+# ============================================================================
+
+def install_app(built_app):
+    INSTALL_DIR.mkdir(parents=True, exist_ok=True)
+    if APP_PATH_INSTALLED.exists():
+        shutil.rmtree(APP_PATH_INSTALLED)
+    shutil.copytree(built_app, APP_PATH_INSTALLED)
+    print(f"✓ 已安装到: {APP_PATH_INSTALLED}")
+
+    # 把 shell 脚本放到 Application Scripts 目录 —— NSUserUnixTask 只从这里加载
+    app_scripts_dir = (
+        Path.home() / "Library" / "Application Scripts" / BUNDLE_ID_EXT
+    )
+    if app_scripts_dir.exists():
+        shutil.rmtree(app_scripts_dir)
+    app_scripts_dir.mkdir(parents=True)
+    for src in SCRIPTS_DIR.iterdir():
+        dst = app_scripts_dir / src.name
+        shutil.copy2(src, dst)
+        dst.chmod(0o755)
+    print(f"✓ 已安装脚本到: {app_scripts_dir}")
+
+    # 让 Launch Services 感知到新的 app / appex
+    lsreg = (
+        "/System/Library/Frameworks/CoreServices.framework/Versions/A/"
+        "Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
+    )
+    subprocess.run([lsreg, "-f", str(APP_PATH_INSTALLED)], check=False)
+
+    appex_path = APP_PATH_INSTALLED / "Contents" / "PlugIns" / "FinderSync.appex"
+    subprocess.run(["pluginkit", "-a", str(appex_path)], check=False)
+    subprocess.run(["pluginkit", "-e", "use", "-i", BUNDLE_ID_EXT], check=False)
+    print("✓ 已向 pluginkit 注册并启用扩展")
+
+
+def remove_legacy_automator_services():
+    services_dir = Path.home() / "Library" / "Services"
+    removed = 0
+    for p in services_dir.glob("▸*.workflow"):
+        shutil.rmtree(p)
+        removed += 1
+    if removed:
+        print(f"✓ 已移除 {removed} 个旧 Automator 服务 bundle")
+
+
+# ============================================================================
+# Main
+# ============================================================================
+
+def main():
+    docx = ensure_blank_docx()
+    services = service_defs(docx)
+    write_scripts(services)
+    write_swift_sources(services)
+    built = build_app()
+    install_app(built)
+    remove_legacy_automator_services()
+
+    # 让 Finder 重新读扩展
+    subprocess.run(["killall", "Finder"], capture_output=True)
+
+    print()
+    print("=" * 60)
+    print("完成。首次使用需要去系统设置里启用扩展（一次性）：")
+    print("  系统设置 → 隐私与安全 → 扩展 → 访达扩展")
+    print("  在列表里勾选 SuperRightClick")
+    print("=" * 60)
+    # 尝试自动打开扩展面板
+    subprocess.run(
+        ["open", "x-apple.systempreferences:com.apple.ExtensionsPreferences"],
+        capture_output=True,
+    )
+
+
+if __name__ == "__main__":
+    main()

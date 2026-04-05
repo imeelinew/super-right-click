@@ -1,0 +1,11 @@
+# install.py 生成的产物 —— 重跑 install.py 可复现
+build/
+scripts/
+src/
+templates/
+
+# 旧 Automator 方案的备份，保留在本地即可
+install.py.automator.bak
+
+# macOS
+.DS_Store
