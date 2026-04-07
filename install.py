@@ -7,7 +7,7 @@ Finder Sync Extension API，菜单能同时出现在两种场景：
   2. 右键 Finder 窗口的空白区域（旧方案无法覆盖）
 
 架构：
-  scripts/              9 个独立 bash 脚本，每个对应一个菜单项
+  scripts/              独立 bash 脚本，每个对应一个菜单项
   src/ext/              Finder Sync extension Swift 源
   src/host/             空壳宿主 app Swift 源（只为承载 appex）
   build/                编译产物
@@ -128,6 +128,235 @@ echo "OK: path(s) copied"
 '''
 
 
+def make_minimize_windows_script():
+    return _LOG_HEAD.format(tag="minimize-desktop") + r'''if [ "${1-}" != "--worker" ]; then
+    /usr/bin/nohup /bin/zsh "$0" --worker >/dev/null 2>&1 &
+    echo "QUEUED worker"
+    exit 0
+fi
+
+/bin/sleep 1.0
+result=$(/usr/bin/osascript <<'APPLESCRIPT'
+tell application "System Events"
+    set minimizedCount to 0
+    set checkedCount to 0
+    set appProcs to application processes whose background only is false
+    repeat with proc in appProcs
+        try
+            repeat with win in windows of proc
+                try
+                    set checkedCount to checkedCount + 1
+                    if value of attribute "AXMinimized" of win is false then
+                        set value of attribute "AXMinimized" of win to true
+                        set minimizedCount to minimizedCount + 1
+                    end if
+                end try
+            end repeat
+        end try
+    end repeat
+end tell
+return (minimizedCount as string) & ":" & (checkedCount as string)
+APPLESCRIPT
+)
+rc=$?
+
+if [ "$rc" -ne 0 ]; then
+    /usr/bin/osascript -e "display notification \"执行失败，可能需要辅助功能权限\" with title \"最小化当前桌面的全部窗口\""
+    echo "FAIL: osascript status=$rc"
+    exit 1
+fi
+
+result="${result//$'\n'/}"
+count="${result%%:*}"
+checked="${result##*:}"
+/usr/bin/osascript -e "display notification \"已最小化 $count 个窗口\" with title \"最小化当前桌面的全部窗口\""
+echo "OK: minimized=$count checked=$checked"
+'''
+
+
+def make_cut_items_script():
+    return _LOG_HEAD.format(tag="cut-items") + r'''emulate -L zsh
+setopt local_options no_nomatch
+
+state_dir="$HOME/Library/Application Support/SuperRightClick"
+state_file="$state_dir/cut-items.bin"
+tmp_file=$(/usr/bin/mktemp /tmp/sr-cut.XXXXXX) || exit 1
+
+if ! /bin/mkdir -p "$state_dir"; then
+    /bin/rm -f "$tmp_file"
+    /usr/bin/osascript -e "display notification \"无法创建状态目录\" with title \"剪切\""
+    exit 1
+fi
+
+typeset -a selected
+
+for raw_path in "$@"; do
+    [ -e "$raw_path" ] || continue
+    path="${raw_path:A}"
+
+    duplicate=0
+    nested_under_existing=0
+    typeset -a next_selected
+    next_selected=()
+
+    for existing in "${selected[@]}"; do
+        if [ "$path" = "$existing" ]; then
+            duplicate=1
+            next_selected+=("$existing")
+            continue
+        fi
+
+        if [ -d "$existing" ] && [ "${path#"$existing"/}" != "$path" ]; then
+            nested_under_existing=1
+            next_selected+=("$existing")
+            continue
+        fi
+
+        if [ -d "$path" ] && [ "${existing#"$path"/}" != "$existing" ]; then
+            echo "DROP nested child: $existing (covered by $path)"
+            continue
+        fi
+
+        next_selected+=("$existing")
+    done
+
+    selected=("${next_selected[@]}")
+
+    if [ "$duplicate" -eq 1 ]; then
+        echo "SKIP duplicate: $path"
+        continue
+    fi
+    if [ "$nested_under_existing" -eq 1 ]; then
+        echo "SKIP nested child: $path"
+        continue
+    fi
+
+    selected+=("$path")
+    echo "CUT: $path"
+done
+
+count="${#selected[@]}"
+
+if [ "$count" -eq 0 ]; then
+    /bin/rm -f "$tmp_file"
+    /usr/bin/osascript -e "display notification \"请先选中文件或文件夹\" with title \"剪切\""
+    exit 0
+fi
+
+for path in "${selected[@]}"; do
+    printf '%s\0' "$path" >> "$tmp_file"
+done
+
+/bin/mv "$tmp_file" "$state_file"
+/usr/bin/osascript -e "display notification \"已暂存 $count 项 | 前往目标文件夹后点击粘贴到这里\" with title \"剪切\""
+echo "OK: cut items stored count=$count"
+'''
+
+
+def make_paste_cut_items_script():
+    return _LOG_HEAD.format(tag="paste-cut-items") + r'''emulate -L zsh
+setopt local_options no_nomatch
+
+state_dir="$HOME/Library/Application Support/SuperRightClick"
+state_file="$state_dir/cut-items.bin"
+
+if [ "$#" -ne 1 ] || [ ! -d "$1" ]; then
+    /usr/bin/osascript -e "display notification \"请在目标文件夹空白处或文件夹本身使用\" with title \"粘贴到这里\""
+    exit 0
+fi
+
+dest="$1"
+if [ ! -s "$state_file" ]; then
+    /usr/bin/osascript -e "display notification \"当前没有已剪切的项目\" with title \"粘贴到这里\""
+    exit 0
+fi
+
+dest="${dest:A}"
+tmp_keep=$(/usr/bin/mktemp /tmp/sr-cut-keep.XXXXXX) || exit 1
+moved=0
+skipped=0
+kept=0
+missing=0
+same_dir_kept=0
+recursive_kept=0
+failed_kept=0
+
+while IFS= read -r -d '' src; do
+    if [ ! -e "$src" ]; then
+        missing=$((missing+1))
+        echo "MISSING: $src"
+        continue
+    fi
+
+    src="${src:A}"
+    src_parent="${src:h}"
+    src_name="${src:t}"
+    stem="${src_name:r}"
+    ext="${src_name:e}"
+
+    if [ "$src_parent" = "$dest" ]; then
+        printf '%s\0' "$src" >> "$tmp_keep"
+        kept=$((kept+1))
+        same_dir_kept=$((same_dir_kept+1))
+        echo "KEEP same-dir: $src"
+        continue
+    fi
+
+    if [ -d "$src" ]; then
+        if [ "$dest" = "$src" ] || [ "${dest#"$src"/}" != "$dest" ]; then
+            printf '%s\0' "$src" >> "$tmp_keep"
+            kept=$((kept+1))
+            recursive_kept=$((recursive_kept+1))
+            echo "KEEP recursive-dir: $src"
+            continue
+        fi
+        suffix=""
+    elif [ "$stem" = "$src_name" ]; then
+        suffix=""
+    else
+        suffix=".$ext"
+    fi
+
+    candidate="$dest/$src_name"
+    i=1
+    while [ -e "$candidate" ]; do
+        if [ -d "$src" ] || [ "$suffix" = "" ]; then
+            candidate="$dest/$src_name $i"
+        else
+            candidate="$dest/$stem $i$suffix"
+        fi
+        i=$((i+1))
+    done
+
+    if /bin/mv "$src" "$candidate"; then
+        moved=$((moved+1))
+        echo "MOVE: $src -> $candidate"
+    else
+        printf '%s\0' "$src" >> "$tmp_keep"
+        kept=$((kept+1))
+        failed_kept=$((failed_kept+1))
+        echo "FAIL move: $src -> $candidate"
+    fi
+done < "$state_file"
+
+if [ "$kept" -gt 0 ]; then
+    /bin/mv "$tmp_keep" "$state_file"
+else
+    /bin/rm -f "$tmp_keep" "$state_file"
+fi
+
+msg="已粘贴 $moved 项 | 跳过 $skipped 项"
+if [ "$missing" -gt 0 ]; then
+    msg="$msg | 丢失 $missing 项"
+fi
+if [ "$kept" -gt 0 ]; then
+    msg="$msg | 保留 $kept 项待重试"
+fi
+/usr/bin/osascript -e "display notification \"$msg\" with title \"粘贴到这里\""
+echo "DONE: moved=$moved skipped=$skipped missing=$missing kept=$kept same_dir_kept=$same_dir_kept recursive_kept=$recursive_kept failed_kept=$failed_kept dest=$dest"
+'''
+
+
 # ============================================================================
 # Part 2: 空白 docx 模板
 # ============================================================================
@@ -168,11 +397,14 @@ def ensure_blank_docx():
 def service_defs(docx_path):
     # (菜单文案, 脚本文件名, 脚本内容, SF Symbol 名)
     return [
-        ("新建 Markdown 文件", "new_md.sh",       make_dated_file_script("md"),                              "doc.text"),
-        ("新建文本文件",       "new_txt.sh",      make_shell_script("txt",  "未命名"),                       "doc.plaintext"),
-        ("新建 Word 文档",     "new_docx.sh",     make_shell_script("docx", "未命名", source=str(docx_path)), "doc.richtext"),
-        ("在 Ghostty 中打开",  "open_ghostty.sh", make_open_ghostty_script(),                                "terminal"),
-        ("复制路径",           "copy_path.sh",    make_copy_path_script(),                                   "doc.on.clipboard"),
+        ("新建 Markdown 文件", "new_md.sh",       make_dated_file_script("md"),                              ""),
+        ("新建文本文件",       "new_txt.sh",      make_shell_script("txt",  "未命名"),                       ""),
+        ("最小化当前桌面的全部窗口", "minimize_desktop_windows.sh", make_minimize_windows_script(),          "rectangle.compress.vertical"),
+        ("新建 Word 文档",     "new_docx.sh",     make_shell_script("docx", "未命名", source=str(docx_path)), ""),
+        ("剪切",               "cut_items.sh",    make_cut_items_script(),                                   ""),
+        ("粘贴到这里",         "paste_cut_items.sh", make_paste_cut_items_script(),                           ""),
+        ("在 Ghostty 中打开",  "open_ghostty.sh", make_open_ghostty_script(),                                ""),
+        ("复制路径",           "copy_path.sh",    make_copy_path_script(),                                   ""),
     ]
 
 
@@ -225,6 +457,7 @@ class {EXT_CLASS_NAME}: FIFinderSync {{
 
     override func menu(for menuKind: FIMenuKind) -> NSMenu {{
         let menu = NSMenu(title: "")
+        let submenu = NSMenu(title: "扩展功能")
 
         // 跨 XPC 时 NSImage 的 isTemplate 会丢，Finder 拿到图片只会原样画，
         // 所以不能依赖 template 自动着色。自己检测当前主题，把 SF Symbol
@@ -244,8 +477,19 @@ class {EXT_CLASS_NAME}: FIFinderSync {{
             if !symbol.isEmpty, let img = tintedSymbol(symbol, color: tint) {{
                 item.image = img
             }}
-            menu.addItem(item)
+            if title == "最小化当前桌面的全部窗口" {{
+                menu.addItem(item)
+            }} else {{
+                submenu.addItem(item)
+            }}
         }}
+
+        let parent = NSMenuItem(title: "扩展功能", action: nil, keyEquivalent: "")
+        if let img = tintedSymbol("sparkles", color: tint) {{
+            parent.image = img
+        }}
+        parent.submenu = submenu
+        menu.addItem(parent)
         return menu
     }}
 
@@ -288,16 +532,23 @@ class {EXT_CLASS_NAME}: FIFinderSync {{
         }}
         let filename = services[sender.tag].1  // (title, filename, symbol)
 
+        let controller = FIFinderSyncController.default()
+        let selected = controller.selectedItemURLs() ?? []
+
         var targets: [String] = []
-        if let selected = FIFinderSyncController.default().selectedItemURLs(),
-           !selected.isEmpty {{
+        if filename == "minimize_desktop_windows.sh" {{
+            targets = []
+        }} else if filename == "cut_items.sh" {{
             targets = selected.map {{ $0.path }}
-        }} else if let target = FIFinderSyncController.default().targetedURL() {{
+        }} else if !selected.isEmpty {{
+            targets = selected.map {{ $0.path }}
+        }} else if let target = controller.targetedURL() {{
             targets = [target.path]
         }}
         debugLog("targets: \\(targets)")
 
-        guard !targets.isEmpty else {{
+        let allowsEmptyTargets = filename == "cut_items.sh" || filename == "minimize_desktop_windows.sh"
+        guard !targets.isEmpty || allowsEmptyTargets else {{
             debugLog("no target")
             return
         }}

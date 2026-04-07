@@ -11,15 +11,23 @@
 1. 右键选中的文件 / 文件夹
 2. **右键 Finder 窗口空白区域**（旧版做不到）
 
-当前菜单项（5 个，见 `install.py` 里的 `service_defs()`）。每项都带一个 SF Symbol 图标，自动跟深浅色模式（见坑 11）。
+当前右键菜单顶层有两个入口：
 
-| 菜单文案 | 脚本 | SF Symbol | 功能 |
-|---|---|---|---|
-| 新建 Markdown 文件 | `new_md.sh` | `doc.text` | 新建 `YYYY-MM-DD.md`（当日日期命名） |
-| 新建文本文件 | `new_txt.sh` | `doc.plaintext` | 新建 `未命名.txt`（冲突自动编号） |
-| 新建 Word 文档 | `new_docx.sh` | `doc.richtext` | 新建 `未命名.docx`（基于内置最小合法 docx 模板） |
-| 在 Ghostty 中打开 | `open_ghostty.sh` | `terminal` | `open -a Ghostty "$dir"` |
-| 复制路径 | `copy_path.sh` | `doc.on.clipboard` | 把绝对路径写入剪贴板 + 通知（UTF-8 安全） |
+1. `最小化当前桌面的全部窗口`
+2. `扩展功能` 二级菜单
+
+我们自己实现的 8 个动作都挂在这两个入口下，每项都带一个 SF Symbol 图标，自动跟深浅色模式（见坑 11）。
+
+| 菜单位置 | 菜单文案 | 脚本 | SF Symbol | 功能 |
+|---|---|---|---|---|
+| 顶层 | 最小化当前桌面的全部窗口 | `minimize_desktop_windows.sh` | `rectangle.compress.vertical` | 最小化当前 Space 里当前可见的窗口；通常需要系统给 `osascript` / 辅助功能权限 |
+| 扩展功能 | 新建 Markdown 文件 | `new_md.sh` | `""` | 新建 `YYYY-MM-DD.md`（当日日期命名） |
+| 扩展功能 | 新建文本文件 | `new_txt.sh` | `""` | 新建 `未命名.txt`（冲突自动编号） |
+| 扩展功能 | 新建 Word 文档 | `new_docx.sh` | `""` | 新建 `未命名.docx`（基于内置最小合法 docx 模板） |
+| 扩展功能 | 剪切 | `cut_items.sh` | `""` | 自定义“剪切”所选文件/文件夹，暂存到扩展自己的状态文件 |
+| 扩展功能 | 粘贴到这里 | `paste_cut_items.sh` | `""` | 把之前“剪切”的文件/文件夹移动到当前目录，冲突自动编号 |
+| 扩展功能 | 在 Ghostty 中打开 | `open_ghostty.sh` | `""` | `open -a Ghostty "$dir"` |
+| 扩展功能 | 复制路径 | `copy_path.sh` | `""` | 把绝对路径写入剪贴板 + 通知（UTF-8 安全） |
 
 ## 三层架构
 
@@ -28,8 +36,8 @@
 | 层 | 语言 | 运行时机 | 作用 |
 |---|---|---|---|
 | 构建器 | Python (`install.py`) | 只在 `python3 install.py` 时 | 生成 Swift/脚本/plist → `swiftc` 编译 → `codesign` 签名 → 拷贝到 `~/Applications` → `pluginkit` 注册 |
-| Finder 插件 | Swift (`FinderSyncExt`) | Finder 每次右键触发 | 实现 `FIFinderSync`；`menu(for:)` 返回 NSMenu；`runScript(_:)` 用 `NSUserUnixTask` 启动对应脚本 |
-| 菜单动作 | bash (`scripts/*.sh`) | 用户点菜单时 | 真正干活的代码（创建文件、复制路径、开 Ghostty 等） |
+| Finder 插件 | Swift (`FinderSyncExt`) | Finder 每次右键触发 | 实现 `FIFinderSync`；`menu(for:)` 返回顶层动作 + `扩展功能` 子菜单；`runScript(_:)` 用 `NSUserUnixTask` 启动对应脚本 |
+| 菜单动作 | bash (`scripts/*.sh`) | 用户点菜单时 | 真正干活的代码（创建文件、剪切/粘贴移动、复制路径、开 Ghostty 等） |
 
 ## 文件布局
 
