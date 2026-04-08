@@ -128,52 +128,6 @@ echo "OK: path(s) copied"
 '''
 
 
-def make_minimize_windows_script():
-    return _LOG_HEAD.format(tag="minimize-desktop") + r'''if [ "${1-}" != "--worker" ]; then
-    /usr/bin/nohup /bin/zsh "$0" --worker >/dev/null 2>&1 &
-    echo "QUEUED worker"
-    exit 0
-fi
-
-/bin/sleep 1.0
-result=$(/usr/bin/osascript <<'APPLESCRIPT'
-tell application "System Events"
-    set minimizedCount to 0
-    set checkedCount to 0
-    set appProcs to application processes whose background only is false
-    repeat with proc in appProcs
-        try
-            repeat with win in windows of proc
-                try
-                    set checkedCount to checkedCount + 1
-                    if value of attribute "AXMinimized" of win is false then
-                        set value of attribute "AXMinimized" of win to true
-                        set minimizedCount to minimizedCount + 1
-                    end if
-                end try
-            end repeat
-        end try
-    end repeat
-end tell
-return (minimizedCount as string) & ":" & (checkedCount as string)
-APPLESCRIPT
-)
-rc=$?
-
-if [ "$rc" -ne 0 ]; then
-    /usr/bin/osascript -e "display notification \"执行失败，可能需要辅助功能权限\" with title \"最小化当前桌面的全部窗口\""
-    echo "FAIL: osascript status=$rc"
-    exit 1
-fi
-
-result="${result//$'\n'/}"
-count="${result%%:*}"
-checked="${result##*:}"
-/usr/bin/osascript -e "display notification \"已最小化 $count 个窗口\" with title \"最小化当前桌面的全部窗口\""
-echo "OK: minimized=$count checked=$checked"
-'''
-
-
 def make_cut_items_script():
     return _LOG_HEAD.format(tag="cut-items") + r'''emulate -L zsh
 setopt local_options no_nomatch
@@ -399,7 +353,6 @@ def service_defs(docx_path):
     return [
         ("新建 Markdown 文件", "new_md.sh",       make_dated_file_script("md"),                              ""),
         ("新建文本文件",       "new_txt.sh",      make_shell_script("txt",  "未命名"),                       ""),
-        ("最小化当前桌面的全部窗口", "minimize_desktop_windows.sh", make_minimize_windows_script(),          "rectangle.compress.vertical"),
         ("新建 Word 文档",     "new_docx.sh",     make_shell_script("docx", "未命名", source=str(docx_path)), ""),
         ("剪切",               "cut_items.sh",    make_cut_items_script(),                                   ""),
         ("粘贴到这里",         "paste_cut_items.sh", make_paste_cut_items_script(),                           ""),
@@ -477,11 +430,7 @@ class {EXT_CLASS_NAME}: FIFinderSync {{
             if !symbol.isEmpty, let img = tintedSymbol(symbol, color: tint) {{
                 item.image = img
             }}
-            if title == "最小化当前桌面的全部窗口" {{
-                menu.addItem(item)
-            }} else {{
-                submenu.addItem(item)
-            }}
+            submenu.addItem(item)
         }}
 
         let parent = NSMenuItem(title: "扩展功能", action: nil, keyEquivalent: "")
@@ -536,9 +485,7 @@ class {EXT_CLASS_NAME}: FIFinderSync {{
         let selected = controller.selectedItemURLs() ?? []
 
         var targets: [String] = []
-        if filename == "minimize_desktop_windows.sh" {{
-            targets = []
-        }} else if filename == "cut_items.sh" {{
+        if filename == "cut_items.sh" {{
             targets = selected.map {{ $0.path }}
         }} else if !selected.isEmpty {{
             targets = selected.map {{ $0.path }}
@@ -547,7 +494,7 @@ class {EXT_CLASS_NAME}: FIFinderSync {{
         }}
         debugLog("targets: \\(targets)")
 
-        let allowsEmptyTargets = filename == "cut_items.sh" || filename == "minimize_desktop_windows.sh"
+        let allowsEmptyTargets = filename == "cut_items.sh"
         guard !targets.isEmpty || allowsEmptyTargets else {{
             debugLog("no target")
             return
