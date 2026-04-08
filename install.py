@@ -116,6 +116,13 @@ done
 '''
 
 
+def make_open_vscode_script():
+    return _LOG_HEAD.format(tag="vscode") + r'''for dir in "$@"; do
+    /usr/bin/open -a "Visual Studio Code" "$dir" && echo "OK: $dir" || echo "FAIL: $dir"
+done
+'''
+
+
 def make_copy_path_script():
     return _LOG_HEAD.format(tag="copy-path") + r'''tmp=$(/usr/bin/mktemp /tmp/sr_clip.XXXXXX)
 printf '%s' "$1" > "$tmp"
@@ -351,13 +358,14 @@ def ensure_blank_docx():
 def service_defs(docx_path):
     # (菜单文案, 脚本文件名, 脚本内容, SF Symbol 名)
     return [
-        ("新建 Markdown 文件", "new_md.sh",       make_dated_file_script("md"),                              ""),
-        ("新建文本文件",       "new_txt.sh",      make_shell_script("txt",  "未命名"),                       ""),
-        ("新建 Word 文档",     "new_docx.sh",     make_shell_script("docx", "未命名", source=str(docx_path)), ""),
-        ("剪切",               "cut_items.sh",    make_cut_items_script(),                                   ""),
-        ("粘贴到这里",         "paste_cut_items.sh", make_paste_cut_items_script(),                           ""),
-        ("在 Ghostty 中打开",  "open_ghostty.sh", make_open_ghostty_script(),                                ""),
-        ("复制路径",           "copy_path.sh",    make_copy_path_script(),                                   ""),
+        ("生成 文本文件",      "new_txt.sh",      make_shell_script("txt",  "未命名"),                       ""),
+        ("生成 Markdown 文件", "new_md.sh",       make_dated_file_script("md"),                              ""),
+        ("生成 Word 文档",     "new_docx.sh",     make_shell_script("docx", "未命名", source=str(docx_path)), ""),
+        ("召唤 Ghostty",       "open_ghostty.sh", make_open_ghostty_script(),                                ""),
+        ("召唤 VS Code",       "open_vscode.sh",  make_open_vscode_script(),                                 ""),
+        ("抄录路径",           "copy_path.sh",    make_copy_path_script(),                                   ""),
+        ("消失",               "cut_items.sh",    make_cut_items_script(),                                   ""),
+        ("瞬移到这里",         "paste_cut_items.sh", make_paste_cut_items_script(),                           ""),
     ]
 
 
@@ -410,7 +418,7 @@ class {EXT_CLASS_NAME}: FIFinderSync {{
 
     override func menu(for menuKind: FIMenuKind) -> NSMenu {{
         let menu = NSMenu(title: "")
-        let submenu = NSMenu(title: "扩展功能")
+        let submenu = NSMenu(title: "魔法")
 
         // 跨 XPC 时 NSImage 的 isTemplate 会丢，Finder 拿到图片只会原样画，
         // 所以不能依赖 template 自动着色。自己检测当前主题，把 SF Symbol
@@ -433,7 +441,7 @@ class {EXT_CLASS_NAME}: FIFinderSync {{
             submenu.addItem(item)
         }}
 
-        let parent = NSMenuItem(title: "扩展功能", action: nil, keyEquivalent: "")
+        let parent = NSMenuItem(title: "魔法", action: nil, keyEquivalent: "")
         if let img = tintedSymbol("sparkles", color: tint) {{
             parent.image = img
         }}

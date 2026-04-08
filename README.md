@@ -11,19 +11,20 @@
 1. 右键选中的文件 / 文件夹
 2. **右键 Finder 窗口空白区域**（旧版做不到）
 
-当前右键菜单顶层只有一个 `扩展功能` 二级菜单。
+当前右键菜单顶层只有一个 `魔法` 二级菜单。
 
-我们自己实现的 7 个动作都挂在里面，每项都带一个 SF Symbol 图标，自动跟深浅色模式（见坑 11）。
+我们自己实现的 8 个动作都挂在里面，按固定顺序连续排列。外层父菜单保留图标，二级菜单项不显示图标。
 
 | 菜单位置 | 菜单文案 | 脚本 | SF Symbol | 功能 |
 |---|---|---|---|---|
-| 扩展功能 | 新建 Markdown 文件 | `new_md.sh` | `""` | 新建 `YYYY-MM-DD.md`（当日日期命名） |
-| 扩展功能 | 新建文本文件 | `new_txt.sh` | `""` | 新建 `未命名.txt`（冲突自动编号） |
-| 扩展功能 | 新建 Word 文档 | `new_docx.sh` | `""` | 新建 `未命名.docx`（基于内置最小合法 docx 模板） |
-| 扩展功能 | 剪切 | `cut_items.sh` | `""` | 自定义“剪切”所选文件/文件夹，暂存到扩展自己的状态文件 |
-| 扩展功能 | 粘贴到这里 | `paste_cut_items.sh` | `""` | 把之前“剪切”的文件/文件夹移动到当前目录，冲突自动编号 |
-| 扩展功能 | 在 Ghostty 中打开 | `open_ghostty.sh` | `""` | `open -a Ghostty "$dir"` |
-| 扩展功能 | 复制路径 | `copy_path.sh` | `""` | 把绝对路径写入剪贴板 + 通知（UTF-8 安全） |
+| 魔法 | 生成 文本文件 | `new_txt.sh` | `""` | 新建 `未命名.txt`（冲突自动编号） |
+| 魔法 | 生成 Markdown 文件 | `new_md.sh` | `""` | 新建 `YYYY-MM-DD.md`（当日日期命名） |
+| 魔法 | 生成 Word 文档 | `new_docx.sh` | `""` | 新建 `未命名.docx`（基于内置最小合法 docx 模板） |
+| 魔法 | 召唤 Ghostty | `open_ghostty.sh` | `""` | `open -a Ghostty "$dir"` |
+| 魔法 | 召唤 VS Code | `open_vscode.sh` | `""` | `open -a "Visual Studio Code" "$dir"` |
+| 魔法 | 抄录路径 | `copy_path.sh` | `""` | 把绝对路径写入剪贴板 + 通知（UTF-8 安全） |
+| 魔法 | 消失 | `cut_items.sh` | `""` | 自定义“剪切”所选文件/文件夹，暂存到扩展自己的状态文件 |
+| 魔法 | 瞬移到这里 | `paste_cut_items.sh` | `""` | 把之前“剪切”的文件/文件夹移动到当前目录，冲突自动编号 |
 
 ## 三层架构
 
@@ -62,9 +63,9 @@
 ## install.py 做的事（按顺序）
 
 1. `ensure_blank_docx()` —— 用 `zipfile` 生成最小合法 `.docx`（3 个 XML 打包）
-2. `service_defs(docx)` —— 返回 `[(菜单文案, 脚本文件名, 脚本内容)]` 列表
+2. `service_defs(docx)` —— 返回 `[(菜单文案, 脚本文件名, 脚本内容, SF Symbol)]` 列表
 3. `write_scripts()` —— 写 `scripts/*.sh`
-4. `write_swift_sources()` —— 根据 services 列表动态拼 `FinderSyncExt.swift`，菜单项是 `[(String, String)]` 字面量
+4. `write_swift_sources()` —— 根据 services 列表动态拼 `FinderSyncExt.swift`，菜单项是 `[(String, String, String)]` 字面量
 5. `build_app()` ——
    - `swiftc` 编译 host 壳
    - `swiftc -module-name SuperRightClickExt -Xlinker -e -Xlinker _NSExtensionMain` 编译 extension（**见坑 1 和坑 2**）
