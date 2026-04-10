@@ -331,6 +331,100 @@ echo "DONE: moved=$moved missing=$missing kept=$kept same_dir_kept=$same_dir_kep
 '''
 
 
+def make_gen_subtitles_script():
+    """用 whisper-cpp 给视频/音频生成 .srt 字幕。
+
+    运行时依赖（NSUserUnixTask 在沙箱外跑，所以可以直接调系统命令）：
+      - /opt/homebrew/bin/whisper-cli （brew install whisper-cpp）
+      - /opt/homebrew/bin/ffmpeg
+      - ~/whisper-models/ggml-medium.bin
+
+    流程：ffmpeg 抽 16kHz mono pcm_s16le → whisper-cli -l zh -osrt → 删临时 wav。
+    字幕与源视频同目录同名，已存在则跳过；批量选中会按顺序跑。
+    长任务：NSUserUnixTask 启动后 Finder 立即返回，脚本在独立 helper 里异步跑。
+    """
+    return _LOG_HEAD.format(tag="gen-subtitles") + r'''emulate -L zsh
+setopt local_options no_nomatch
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+MODEL="$HOME/whisper-models/ggml-medium.bin"
+WHISPER_LANG="zh"
+
+notify() {
+    /usr/bin/osascript -e "display notification \"$1\" with title \"生成字幕\""
+}
+
+if ! command -v whisper-cli >/dev/null 2>&1; then
+    notify "未找到 whisper-cli，请先 brew install whisper-cpp"
+    exit 1
+fi
+if ! command -v ffmpeg >/dev/null 2>&1; then
+    notify "未找到 ffmpeg，请先 brew install ffmpeg"
+    exit 1
+fi
+if [ ! -f "$MODEL" ]; then
+    notify "未找到模型: $MODEL"
+    exit 1
+fi
+
+if [ "$#" -eq 0 ]; then
+    notify "请先选中视频文件"
+    exit 0
+fi
+
+notify "开始生成 $# 个字幕，后台运行中…"
+
+ok=0
+fail=0
+skipped=0
+
+for src in "$@"; do
+    if [ ! -f "$src" ]; then
+        echo "SKIP not a file: $src"
+        skipped=$((skipped+1))
+        continue
+    fi
+
+    stem="${src%.*}"
+    srt="$stem.srt"
+
+    if [ -e "$srt" ]; then
+        echo "SKIP exists: $srt"
+        skipped=$((skipped+1))
+        continue
+    fi
+
+    tmp_base=$(/usr/bin/mktemp -t sr-whisper) || { fail=$((fail+1)); continue; }
+    tmp_wav="${tmp_base}.wav"
+
+    echo "--- ffmpeg: $src"
+    if ffmpeg -y -i "$src" -ar 16000 -ac 1 -c:a pcm_s16le "$tmp_wav" -loglevel error; then
+        echo "--- whisper-cli: $src"
+        if whisper-cli -m "$MODEL" -f "$tmp_wav" -l "$WHISPER_LANG" -osrt -of "$stem"; then
+            ok=$((ok+1))
+            echo "OK: $srt"
+            /usr/bin/osascript -e "tell application \"Finder\" to update (POSIX file \"${src:h}\" as alias)" 2>/dev/null
+        else
+            fail=$((fail+1))
+            echo "FAIL whisper: $src"
+        fi
+    else
+        fail=$((fail+1))
+        echo "FAIL ffmpeg: $src"
+    fi
+
+    /bin/rm -f "$tmp_base" "$tmp_wav"
+done
+
+msg="字幕完成 | 成功 $ok"
+[ "$fail" -gt 0 ] && msg="$msg | 失败 $fail"
+[ "$skipped" -gt 0 ] && msg="$msg | 跳过 $skipped"
+notify "$msg"
+echo "DONE: ok=$ok fail=$fail skipped=$skipped"
+'''
+
+
 # ============================================================================
 # Part 2: 空白 docx 模板
 # ============================================================================
@@ -374,6 +468,7 @@ def service_defs(docx_path):
     # 让脚本自己决定怎么提示/退出。只有 cut_items 需要——它的"请先选文件"
     # 通知由脚本发出。
     return [
+        ("生成字幕",           "gen_subtitles.sh", make_gen_subtitles_script(),                               "", False),
         ("生成 文本文件",      "new_txt.sh",      make_shell_script("txt",  "未命名"),                       "", False),
         ("生成 Markdown 文件", "new_md.sh",       make_dated_file_script("md"),                              "", False),
         ("生成 Word 文档",     "new_docx.sh",     make_shell_script("docx", "未命名", source=str(docx_path)), "", False),
