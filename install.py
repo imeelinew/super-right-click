@@ -369,16 +369,19 @@ def ensure_blank_docx():
 # ============================================================================
 
 def service_defs(docx_path):
-    # (菜单文案, 脚本文件名, 脚本内容, SF Symbol 名)
+    # (菜单文案, 脚本文件名, 脚本内容, SF Symbol 名, 允许空目标)
+    # allows_empty=True 表示 Finder 既没选中项也没 targetedURL 时也要派发脚本，
+    # 让脚本自己决定怎么提示/退出。只有 cut_items 需要——它的"请先选文件"
+    # 通知由脚本发出。
     return [
-        ("生成 文本文件",      "new_txt.sh",      make_shell_script("txt",  "未命名"),                       ""),
-        ("生成 Markdown 文件", "new_md.sh",       make_dated_file_script("md"),                              ""),
-        ("生成 Word 文档",     "new_docx.sh",     make_shell_script("docx", "未命名", source=str(docx_path)), ""),
-        ("召唤 Ghostty",       "open_ghostty.sh", make_open_ghostty_script(),                                ""),
-        ("召唤 VS Code",       "open_vscode.sh",  make_open_vscode_script(),                                 ""),
-        ("抄录路径",           "copy_path.sh",    make_copy_path_script(),                                   ""),
-        ("消失",               "cut_items.sh",    make_cut_items_script(),                                   ""),
-        ("瞬移到这里",         "paste_cut_items.sh", make_paste_cut_items_script(),                           ""),
+        ("生成 文本文件",      "new_txt.sh",      make_shell_script("txt",  "未命名"),                       "", False),
+        ("生成 Markdown 文件", "new_md.sh",       make_dated_file_script("md"),                              "", False),
+        ("生成 Word 文档",     "new_docx.sh",     make_shell_script("docx", "未命名", source=str(docx_path)), "", False),
+        ("召唤 Ghostty",       "open_ghostty.sh", make_open_ghostty_script(),                                "", False),
+        ("召唤 VS Code",       "open_vscode.sh",  make_open_vscode_script(),                                 "", False),
+        ("抄录路径",           "copy_path.sh",    make_copy_path_script(),                                   "", False),
+        ("消失",               "cut_items.sh",    make_cut_items_script(),                                   "", True),
+        ("瞬移到这里",         "paste_cut_items.sh", make_paste_cut_items_script(),                           "", False),
     ]
 
 
@@ -390,7 +393,7 @@ def write_scripts(services):
     if SCRIPTS_DIR.exists():
         shutil.rmtree(SCRIPTS_DIR)
     SCRIPTS_DIR.mkdir(parents=True)
-    for _, filename, content, _ in services:
+    for _, filename, content, _, _ in services:
         path = SCRIPTS_DIR / filename
         path.write_text(content, encoding="utf-8")
         path.chmod(0o755)
@@ -407,10 +410,10 @@ def write_swift_sources(services):
             shutil.rmtree(d)
         d.mkdir(parents=True)
 
-    # 菜单项 tuple 列表（Swift 字面量）：(标题, 脚本文件名, SF Symbol 名)
+    # 菜单项 tuple 列表（Swift 字面量）：(标题, 脚本文件名, SF Symbol 名, 允许空目标)
     menu_lines = ",\n        ".join(
-        f'("{title}", "{filename}", "{symbol}")'
-        for title, filename, _, symbol in services
+        f'("{title}", "{filename}", "{symbol}", {"true" if allows_empty else "false"})'
+        for title, filename, _, symbol, allows_empty in services
     )
 
     ext_swift = f'''import Cocoa
@@ -419,7 +422,7 @@ import FinderSync
 @objc({EXT_CLASS_NAME})
 class {EXT_CLASS_NAME}: FIFinderSync {{
 
-    private let services: [(String, String, String)] = [
+    private let services: [(String, String, String, Bool)] = [
         {menu_lines}
     ]
 
@@ -441,7 +444,7 @@ class {EXT_CLASS_NAME}: FIFinderSync {{
         let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         let tint: NSColor = isDark ? .white : .black
 
-        for (idx, (title, _, symbol)) in services.enumerated() {{
+        for (idx, (title, _, symbol, _)) in services.enumerated() {{
             let item = NSMenuItem(
                 title: title,
                 action: #selector(runScript(_:)),
@@ -498,23 +501,22 @@ class {EXT_CLASS_NAME}: FIFinderSync {{
             debugLog("tag out of range")
             return
         }}
-        let filename = services[sender.tag].1  // (title, filename, symbol)
+        let service = services[sender.tag]  // (title, filename, symbol, allowsEmpty)
+        let filename = service.1
+        let allowsEmpty = service.3
 
         let controller = FIFinderSyncController.default()
         let selected = controller.selectedItemURLs() ?? []
 
         var targets: [String] = []
-        if filename == "cut_items.sh" {{
+        if !selected.isEmpty {{
             targets = selected.map {{ $0.path }}
-        }} else if !selected.isEmpty {{
-            targets = selected.map {{ $0.path }}
-        }} else if let target = controller.targetedURL() {{
+        }} else if !allowsEmpty, let target = controller.targetedURL() {{
             targets = [target.path]
         }}
         debugLog("targets: \\(targets)")
 
-        let allowsEmptyTargets = filename == "cut_items.sh"
-        guard !targets.isEmpty || allowsEmptyTargets else {{
+        guard !targets.isEmpty || allowsEmpty else {{
             debugLog("no target")
             return
         }}
