@@ -59,9 +59,14 @@ echo "=== $(date) [{tag}] argc=$# ==="
 
 
 def make_shell_script(ext, base, source=None):
-    """新建文件类：touch 一个空文件，或 cp 一份模板文件。"""
+    """新建文件类：touch 一个空文件，或 cp 一份模板文件。
+
+    source 传模板文件的绝对路径。运行时脚本按 basename 在脚本同目录查找，
+    install_app() 会把同名模板文件一并拷到 Application Scripts 目录里，
+    这样源码树被移动或删除也不影响已安装的扩展。"""
     if source:
-        create_cmd = f'/bin/cp "{source}" "$target"'
+        template_name = Path(source).name
+        create_cmd = f'/bin/cp "$(dirname "$0")/{template_name}" "$target"'
     else:
         create_cmd = '/usr/bin/touch "$target"'
     return _LOG_HEAD.format(tag=ext) + f'''printf 'arg: %s\\n' "$@"
@@ -235,7 +240,6 @@ fi
 dest="${dest:A}"
 tmp_keep=$(/usr/bin/mktemp /tmp/sr-cut-keep.XXXXXX) || exit 1
 moved=0
-skipped=0
 kept=0
 missing=0
 same_dir_kept=0
@@ -306,7 +310,7 @@ else
     /bin/rm -f "$tmp_keep" "$state_file"
 fi
 
-msg="已粘贴 $moved 项 | 跳过 $skipped 项"
+msg="已粘贴 $moved 项"
 if [ "$missing" -gt 0 ]; then
     msg="$msg | 丢失 $missing 项"
 fi
@@ -314,7 +318,7 @@ if [ "$kept" -gt 0 ]; then
     msg="$msg | 保留 $kept 项待重试"
 fi
 /usr/bin/osascript -e "display notification \"$msg\" with title \"粘贴到这里\""
-echo "DONE: moved=$moved skipped=$skipped missing=$missing kept=$kept same_dir_kept=$same_dir_kept recursive_kept=$recursive_kept failed_kept=$failed_kept dest=$dest"
+echo "DONE: moved=$moved missing=$missing kept=$kept same_dir_kept=$same_dir_kept recursive_kept=$recursive_kept failed_kept=$failed_kept dest=$dest"
 '''
 
 
@@ -678,7 +682,13 @@ def install_app(built_app):
         dst = app_scripts_dir / src.name
         shutil.copy2(src, dst)
         dst.chmod(0o755)
-    print(f"✓ 已安装脚本到: {app_scripts_dir}")
+
+    # 模板文件（如 blank.docx）也要随脚本一起放到 Application Scripts 目录，
+    # 脚本里用 $(dirname "$0")/<模板名> 引用，避免依赖源码树位置。
+    for tpl in TEMPLATES_DIR.iterdir():
+        if tpl.is_file():
+            shutil.copy2(tpl, app_scripts_dir / tpl.name)
+    print(f"✓ 已安装脚本与模板到: {app_scripts_dir}")
 
     # 让 Launch Services 感知到新的 app / appex
     lsreg = (
