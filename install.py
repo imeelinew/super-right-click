@@ -468,14 +468,12 @@ class {EXT_CLASS_NAME}: FIFinderSync {{
             return nil
         }}
         let size = NSSize(width: 16, height: 16)
-        let out = NSImage(size: size)
-        out.lockFocus()
-        let rect = NSRect(origin: .zero, size: size)
-        sym.draw(in: rect)
-        color.set()
-        rect.fill(using: .sourceAtop)
-        out.unlockFocus()
-        return out
+        return NSImage(size: size, flipped: false) {{ rect in
+            sym.draw(in: rect)
+            color.set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }}
     }}
 
     private func debugLog(_ msg: String) {{
