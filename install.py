@@ -238,6 +238,14 @@ if [ ! -s "$state_file" ]; then
     exit 0
 fi
 
+# TTL: 状态超过 24h 视为过期，清空 + 通知，避免误粘贴很久以前剪切的内容
+state_age=$(( $(/bin/date +%s) - $(/usr/bin/stat -f%m "$state_file" 2>/dev/null || echo 0) ))
+if [ "$state_age" -gt 86400 ]; then
+    /bin/rm -f "$state_file"
+    /usr/bin/osascript -e "display notification \"已剪切内容超过 24 小时，已自动清空\" with title \"粘贴到这里\""
+    exit 0
+fi
+
 dest="${dest:A}"
 tmp_keep=$(/usr/bin/mktemp /tmp/sr-cut-keep.XXXXXX) || exit 1
 moved=0
