@@ -53,6 +53,7 @@ APP_PATH_INSTALLED = INSTALL_DIR / f"{APP_NAME}.app"
 
 _LOG_HEAD = r'''#!/bin/zsh
 LOG="$HOME/Library/Logs/super-rightclick.log"
+[ "$(/usr/bin/stat -f%z "$LOG" 2>/dev/null || echo 0)" -gt 1048576 ] && /bin/mv "$LOG" "$LOG.1"
 exec >>"$LOG" 2>&1
 echo "=== $(date) [{tag}] argc=$# ==="
 '''
