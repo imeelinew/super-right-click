@@ -84,7 +84,7 @@ for dir in "$@"; do
         /usr/bin/osascript -e "tell application \\"Finder\\" to update (POSIX file \\"$dir\\" as alias)"
     else
         echo "FAIL: $target"
-        /usr/bin/osascript -e "display notification \\"创建失败: $target\\" with title \\"New {ext} File\\""
+        /usr/bin/osascript -e "display notification \\"创建失败: $target\\" with title \\"新建 {ext} 文件\\""
     fi
 done
 '''
@@ -215,7 +215,7 @@ for path in "${selected[@]}"; do
 done
 
 /bin/mv "$tmp_file" "$state_file"
-/usr/bin/osascript -e "display notification \"已暂存 $count 项 | 前往目标文件夹后点击粘贴到这里\" with title \"剪切\""
+/usr/bin/osascript -e "display notification \"已暂存 $count 项 | 前往目标文件夹后点击粘贴\" with title \"剪切\""
 echo "OK: cut items stored count=$count"
 '''
 
@@ -228,13 +228,13 @@ state_dir="$HOME/Library/Application Support/SuperRightClick"
 state_file="$state_dir/cut-items.bin"
 
 if [ "$#" -ne 1 ] || [ ! -d "$1" ]; then
-    /usr/bin/osascript -e "display notification \"请在目标文件夹空白处或文件夹本身使用\" with title \"粘贴到这里\""
+    /usr/bin/osascript -e "display notification \"请在目标文件夹空白处或文件夹本身使用\" with title \"粘贴\""
     exit 0
 fi
 
 dest="$1"
 if [ ! -s "$state_file" ]; then
-    /usr/bin/osascript -e "display notification \"当前没有已剪切的项目\" with title \"粘贴到这里\""
+    /usr/bin/osascript -e "display notification \"当前没有已剪切的项目\" with title \"粘贴\""
     exit 0
 fi
 
@@ -242,7 +242,7 @@ fi
 state_age=$(( $(/bin/date +%s) - $(/usr/bin/stat -f%m "$state_file" 2>/dev/null || echo 0) ))
 if [ "$state_age" -gt 86400 ]; then
     /bin/rm -f "$state_file"
-    /usr/bin/osascript -e "display notification \"已剪切内容超过 24 小时，已自动清空\" with title \"粘贴到这里\""
+    /usr/bin/osascript -e "display notification \"已剪切内容超过 24 小时，已自动清空\" with title \"粘贴\""
     exit 0
 fi
 
@@ -326,7 +326,7 @@ fi
 if [ "$kept" -gt 0 ]; then
     msg="$msg | 保留 $kept 项待重试"
 fi
-/usr/bin/osascript -e "display notification \"$msg\" with title \"粘贴到这里\""
+/usr/bin/osascript -e "display notification \"$msg\" with title \"粘贴\""
 echo "DONE: moved=$moved missing=$missing kept=$kept same_dir_kept=$same_dir_kept recursive_kept=$recursive_kept failed_kept=$failed_kept dest=$dest"
 '''
 
@@ -352,7 +352,7 @@ MODEL="$HOME/whisper-models/ggml-medium.bin"
 WHISPER_LANG="zh"
 
 notify() {
-    /usr/bin/osascript -e "display notification \"$1\" with title \"生成字幕\""
+    /usr/bin/osascript -e "display notification \"$1\" with title \"生成 字幕\""
 }
 
 fmt_time() {
@@ -512,15 +512,15 @@ def service_defs(docx_path):
     # 让脚本自己决定怎么提示/退出。只有 cut_items 需要——它的"请先选文件"
     # 通知由脚本发出。
     return [
-        ("生成字幕",           "gen_subtitles.sh", make_gen_subtitles_script(),                               "", False),
-        ("生成 文本文件",      "new_txt.sh",      make_shell_script("txt",  "未命名"),                       "", False),
-        ("生成 Markdown 文件", "new_md.sh",       make_dated_file_script("md"),                              "", False),
-        ("生成 Word 文档",     "new_docx.sh",     make_shell_script("docx", "未命名", source=str(docx_path)), "", False),
-        ("召唤 Ghostty",       "open_ghostty.sh", make_open_ghostty_script(),                                "", False),
-        ("召唤 VS Code",       "open_vscode.sh",  make_open_vscode_script(),                                 "", False),
-        ("抄录路径",           "copy_path.sh",    make_copy_path_script(),                                   "", False),
-        ("消失",               "cut_items.sh",    make_cut_items_script(),                                   "", True),
-        ("瞬移到这里",         "paste_cut_items.sh", make_paste_cut_items_script(),                           "", False),
+        ("生成 字幕",          "gen_subtitles.sh", make_gen_subtitles_script(),                               "", False),
+        ("新建 文本文件",      "new_txt.sh",      make_shell_script("txt",  "未命名"),                       "", False),
+        ("新建 Markdown 文件", "new_md.sh",       make_dated_file_script("md"),                              "", False),
+        ("新建 Word 文档",     "new_docx.sh",     make_shell_script("docx", "未命名", source=str(docx_path)), "", False),
+        ("用 Ghostty 打开",    "open_ghostty.sh", make_open_ghostty_script(),                                "", False),
+        ("用 VS Code 打开",    "open_vscode.sh",  make_open_vscode_script(),                                 "", False),
+        ("复制路径",           "copy_path.sh",    make_copy_path_script(),                                   "", False),
+        ("剪切",               "cut_items.sh",    make_cut_items_script(),                                   "", True),
+        ("粘贴",               "paste_cut_items.sh", make_paste_cut_items_script(),                           "", False),
     ]
 
 
@@ -573,7 +573,7 @@ class {EXT_CLASS_NAME}: FIFinderSync {{
 
     override func menu(for menuKind: FIMenuKind) -> NSMenu {{
         let menu = NSMenu(title: "")
-        let submenu = NSMenu(title: "魔法")
+        let submenu = NSMenu(title: "扩展功能")
 
         // 跨 XPC 时 NSImage 的 isTemplate 会丢，Finder 拿到图片只会原样画，
         // 所以不能依赖 template 自动着色。自己检测当前主题，把 SF Symbol
@@ -596,7 +596,7 @@ class {EXT_CLASS_NAME}: FIFinderSync {{
             submenu.addItem(item)
         }}
 
-        let parent = NSMenuItem(title: "魔法", action: nil, keyEquivalent: "")
+        let parent = NSMenuItem(title: "扩展功能", action: nil, keyEquivalent: "")
         if let img = tintedSymbol("sparkles", color: tint) {{
             parent.image = img
         }}
