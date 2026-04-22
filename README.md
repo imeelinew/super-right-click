@@ -310,3 +310,84 @@ rm -rf ~/Dev/super-rightclick
 - 给菜单项加图标：`item.image = NSImage(...)`，图片放 appex 的 `Resources/` 里，Info.plist 里 `CFBundleIconFile`
 - 支持二级菜单：`item.submenu = NSMenu(...)`
 - 把 `service_defs()` 抽成 YAML/JSON 配置文件，`install.py` 纯执行。目前菜单项少，不值得
+
+## Code review 修订记录（2026-04-22）
+
+这一轮没有加新功能，只做防御性加固和文档同步。按 commit 顺序记录改动和思路，便于回退定位。
+
+### 1. README 文档漂移修复（commit `1793c25`）
+
+三处描述跟实现对不上：
+
+| 位置 | 旧表述 | 实际 | 影响 |
+|---|---|---|---|
+| 文件布局 | `install.py` "约 400 行" | 现 1200+ 行 | 误导阅读预期 |
+| "如何添加新功能" | 4 元组 `(title, filename, content, symbol)` | 5 元组，含 `allows_empty` | 按文档加功能会编译失败 |
+| "最后一步：生效" | "install.py 本身不 killall Finder" | `main()` 末尾有 `killall Finder` | 与实际行为矛盾 |
+
+`allows_empty` 本来是新加的字段（目前只有「剪切」= `True`），控制"选中为空且拿不到 `targetedURL`"时是否仍派发脚本——让脚本自己决定怎么提示，见 `FinderSyncExt.runScript`。
+
+### 2. 生成的 Swift 字面量用 `json.dumps` 转义（commit `b894049`）
+
+`write_swift_sources()` 之前用 f-string 拼 Swift 字符串字面量：
+
+```python
+f'("{title}", "{filename}", "{symbol}", ...)'
+```
+
+如果 `service_defs()` 里哪天写了个带 `"` 或 `\` 的标题，swiftc 会直接报语法错。换成 `json.dumps(s, ensure_ascii=False)` —— JSON 字符串的转义规则是 Swift 的超集（`\"`、`\\`、`\n`、`\t`、`\uXXXX` 全兼容），等价且安全。生成结果对现有纯中文/ASCII 标题二进制一致，无行为变化。
+
+### 3. `copy_path.sh` 零参数守护 + 移除空 `NSExtensionAttributes`（commit `a4ee568`）
+
+**前者**：脚本原本先 `printf '%s' "$1" > "$tmp"` 再 `shift`，在 `$# == 0` 时 zsh 的 `shift` 会报错、剪贴板还会被写空。改成开头检查 `$#`，无参数直接发通知退出；有参数时用 `first=1` 标志位处理首行，无需 `shift`。
+
+**后者**：`ext_info["NSExtension"]` 里的 `"NSExtensionAttributes": {}` 是空字典，Finder Sync 扩展 pkd 不读任何键——删掉之后 `pluginkit -mAvvv` 仍显示扩展处于 `+` 已启用状态，验证确实无用。
+
+### 4. Swift `Service` struct 替代裸 tuple + `debugLog` 加固（commit `f184604`）
+
+**Struct 化**：原本 `[(String, String, String, Bool)]` + `service.1` / `service.3` 位置访问，加字段/换顺序就是隐形坑。换成：
+
+```swift
+private struct Service {
+    let title: String
+    let filename: String
+    let symbol: String
+    let allowsEmpty: Bool
+}
+```
+
+`menu(for:)` 和 `runScript(_:)` 里全部改成命名访问。install.py 的生成代码同步更新。
+
+**`debugLog` 线程安全 + 1 MB 轮转**：`NSUserUnixTask.execute(..., completion:)` 的 completion block 在任意线程回调，`menu(for:)`、`runScript`、completion 三处都会调 `debugLog`，原本裸 `FileHandle` 写入可能互相穿插。改法：
+
+1. 加 `logQueue = DispatchQueue(label: "...log")` 串行队列，所有写入都 `async` 到这条队列
+2. 写入前 `attributesOfItem` 检查文件大小，超过 1 MB 移到 `.log.1`，策略跟 bash 脚本的 `_LOG_HEAD` 里那段一致
+3. 顺手把 `FileHandle.seekToEndOfFile()` 换成 macOS 11+ 的 `seekToEnd()` / `write(contentsOf:)` / `close()`（项目 `LSMinimumSystemVersion = 11.0`，都可用）
+
+### 5. README 补 `提交并推送当前仓库` 的使用警告（commit `bf889b2`）
+
+菜单里这个动作实际是 `git add -A && git commit -m "<时间戳>" && git push`，有两个隐患：
+- `git add -A` 会把未跟踪文件（含 `.env`、密钥、大二进制等）一并提交——依赖 `.gitignore` 卫生
+- commit message 全是时间戳，历史完全不可读
+
+没有改脚本行为（用户原意就是临时仓库一键推），只在菜单表格里加了警告。
+
+### 没做的
+
+- **`install.py.automator.bak`**：`.gitignore` 已忽略，是用户本地备份，没删
+- **`cut_items.sh`/`paste_cut_items.sh` 加 flock**：理论上有撕裂风险，但 Finder 菜单触发速率下实际概率很低，flock 带来的复杂度不值得
+- **`gen_subtitles.sh` 的 MODEL 路径可配置化**：目前硬编码 `$HOME/whisper-models/ggml-medium.bin`，要改成环境变量/配置文件涉及新增机制，留给下轮
+- **加测试**：`normalize_srt` 的分句逻辑、`ensure_blank_docx` 都是纯函数，值得加 pytest，但需要引入 CI/目录结构，留给下轮
+
+### 验证方式
+
+每个 commit 都走了同一套本地验证：
+
+```bash
+python3 install.py                                                         # 重编译 + 重签名 + 重注册
+pluginkit -mAvvv -p com.apple.FinderSync | grep -c "+ *com.eli.superrightclick"  # 必须 = 1
+for f in ~/Library/Application\ Scripts/com.eli.superrightclick.FinderSync/*.sh; do bash -n "$f"; done
+```
+
+能验证：构建/签名/pluginkit 注册/脚本语法。**不能**从命令行验证：Finder 右键菜单的真实点击行为，需要手动试。如果哪项菜单点下去没反应，按 commit hash `git revert` 就能退回对应那步之前。
+
