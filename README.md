@@ -42,7 +42,7 @@
 
 ```
 ~/Dev/super-rightclick/
-├── install.py                  ← 唯一源码，约 400 行，所有逻辑都在这里
+├── install.py                  ← 唯一源码（约 1200 行，所有逻辑都在这里）
 ├── README.md                   ← 本文件
 ├── templates/blank.docx        ← install.py 首次运行时由 ensure_blank_docx() 生成
 ├── scripts/                    ← install.py 生成的 bash 脚本（每个菜单项一个）
@@ -197,7 +197,9 @@ let tint: NSColor = isDark ? .white : .black
 
 **所有菜单共享同一套构建流程，加新项只改 `service_defs()` 一处**。
 
-每项是 4 元组：`(菜单文案, 脚本文件名, 脚本内容, SF Symbol 名)`。SF Symbol 名可以去 [SF Symbols app](https://developer.apple.com/sf-symbols/) 里挑，传空串 `""` 表示不要图标。
+每项是 5 元组：`(菜单文案, 脚本文件名, 脚本内容, SF Symbol 名, allows_empty)`。
+- SF Symbol 名可以去 [SF Symbols app](https://developer.apple.com/sf-symbols/) 里挑，传空串 `""` 表示不要图标。
+- `allows_empty=True` 表示当 Finder 没选中任何文件、也拿不到窗口 `targetedURL` 时仍然派发脚本（让脚本自己决定怎么兜底）；目前只有「剪切」用到。绝大多数菜单写 `False` 即可。
 
 ### 场景 A：新增"新建 XXX 文件"类菜单
 
@@ -205,8 +207,8 @@ let tint: NSColor = isDark ? .white : .black
 
 ```python
 # service_defs() 里加一行
-("新建 HTML 文件", "new_html.sh", make_shell_script("html", "未命名"), "chevron.left.forwardslash.chevron.right"),
-("新建今日笔记", "new_note.sh", make_dated_file_script("md"), "calendar"),
+("新建 HTML 文件", "new_html.sh", make_shell_script("html", "未命名"), "chevron.left.forwardslash.chevron.right", False),
+("新建今日笔记", "new_note.sh", make_dated_file_script("md"), "calendar", False),
 ```
 
 需要模板文件时，两种做法：
@@ -227,7 +229,7 @@ done
 '''
 ```
 
-然后在 `service_defs()` 里加 `("菜单文案", "xxx.sh", make_xxx_script(), "sf.symbol.name")`。
+然后在 `service_defs()` 里加 `("菜单文案", "xxx.sh", make_xxx_script(), "sf.symbol.name", False)`。
 
 ### 场景 C：新增调用其它 app 的菜单
 
@@ -237,7 +239,8 @@ done
 
 ```bash
 cd ~/Dev/super-rightclick && python3 install.py
-killall Finder   # install.py 本身不 killall Finder，手动重启一下以刷新菜单
+# install.py 最后会自己 killall Finder 以便立刻加载新菜单；
+# 若正在拖拽/重命名等，可手动重跑 killall Finder。
 ```
 
 ## 如何修改已有功能
