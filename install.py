@@ -905,7 +905,8 @@ def write_swift_sources(services):
         return json.dumps(s, ensure_ascii=False)
 
     menu_lines = ",\n        ".join(
-        f'({swift_str(title)}, {swift_str(filename)}, {swift_str(symbol)}, {"true" if allows_empty else "false"})'
+        f'Service(title: {swift_str(title)}, filename: {swift_str(filename)}, '
+        f'symbol: {swift_str(symbol)}, allowsEmpty: {"true" if allows_empty else "false"})'
         for title, filename, _, symbol, allows_empty in services
     )
 
@@ -915,9 +916,22 @@ import FinderSync
 @objc({EXT_CLASS_NAME})
 class {EXT_CLASS_NAME}: FIFinderSync {{
 
-    private let services: [(String, String, String, Bool)] = [
+    private struct Service {{
+        let title: String
+        let filename: String
+        let symbol: String
+        let allowsEmpty: Bool
+    }}
+
+    private let services: [Service] = [
         {menu_lines}
     ]
+
+    // NSUserUnixTask 的 completion 可能在任意线程回调，debugLog 又同时被
+    // menu(for:) / runScript / completion 三处调用，需要一个串行队列把
+    // FileHandle 写入序列化，否则日志行可能互相穿插。
+    private let logQueue = DispatchQueue(label: "com.eli.superrightclick.ext.log")
+    private static let logMaxBytes: UInt64 = 1 * 1024 * 1024
 
     override init() {{
         super.init()
@@ -937,14 +951,14 @@ class {EXT_CLASS_NAME}: FIFinderSync {{
         let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         let tint: NSColor = isDark ? .white : .black
 
-        for (idx, (title, _, symbol, _)) in services.enumerated() {{
+        for (idx, service) in services.enumerated() {{
             let item = NSMenuItem(
-                title: title,
+                title: service.title,
                 action: #selector(runScript(_:)),
                 keyEquivalent: ""
             )
             item.tag = idx
-            if !symbol.isEmpty, let img = tintedSymbol(symbol, color: tint) {{
+            if !service.symbol.isEmpty, let img = tintedSymbol(service.symbol, color: tint) {{
                 item.image = img
             }}
             submenu.addItem(item)
@@ -977,11 +991,20 @@ class {EXT_CLASS_NAME}: FIFinderSync {{
         let logPath = ("~/Library/Logs/super-rightclick-ext.log" as NSString)
             .expandingTildeInPath
         let line = "[\\(Date())] \\(msg)\\n"
-        if let data = line.data(using: .utf8) {{
+        guard let data = line.data(using: .utf8) else {{ return }}
+        logQueue.async {{ [maxBytes = Self.logMaxBytes] in
+            let fm = FileManager.default
+            // 超过 1 MB 就滚一次到 .1，和 bash 脚本的日志轮转策略一致。
+            if let attrs = try? fm.attributesOfItem(atPath: logPath),
+               let size = attrs[.size] as? UInt64, size > maxBytes {{
+                let rotated = logPath + ".1"
+                try? fm.removeItem(atPath: rotated)
+                try? fm.moveItem(atPath: logPath, toPath: rotated)
+            }}
             if let fh = FileHandle(forWritingAtPath: logPath) {{
-                fh.seekToEndOfFile()
-                fh.write(data)
-                fh.closeFile()
+                defer {{ try? fh.close() }}
+                _ = try? fh.seekToEnd()
+                try? fh.write(contentsOf: data)
             }} else {{
                 try? data.write(to: URL(fileURLWithPath: logPath))
             }}
@@ -994,9 +1017,7 @@ class {EXT_CLASS_NAME}: FIFinderSync {{
             debugLog("tag out of range")
             return
         }}
-        let service = services[sender.tag]  // (title, filename, symbol, allowsEmpty)
-        let filename = service.1
-        let allowsEmpty = service.3
+        let service = services[sender.tag]
 
         let controller = FIFinderSyncController.default()
         let selected = controller.selectedItemURLs() ?? []
@@ -1004,12 +1025,12 @@ class {EXT_CLASS_NAME}: FIFinderSync {{
         var targets: [String] = []
         if !selected.isEmpty {{
             targets = selected.map {{ $0.path }}
-        }} else if !allowsEmpty, let target = controller.targetedURL() {{
+        }} else if !service.allowsEmpty, let target = controller.targetedURL() {{
             targets = [target.path]
         }}
         debugLog("targets: \\(targets)")
 
-        guard !targets.isEmpty || allowsEmpty else {{
+        guard !targets.isEmpty || service.allowsEmpty else {{
             debugLog("no target")
             return
         }}
@@ -1021,7 +1042,7 @@ class {EXT_CLASS_NAME}: FIFinderSync {{
                 appropriateFor: nil,
                 create: true
             )
-            let scriptURL = scriptsURL.appendingPathComponent(filename)
+            let scriptURL = scriptsURL.appendingPathComponent(service.filename)
             debugLog("scriptURL: \\(scriptURL.path)")
             let task = try NSUserUnixTask(url: scriptURL)
             task.execute(withArguments: targets) {{ [weak self] error in
