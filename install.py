@@ -24,6 +24,7 @@ Finder Sync Extension API，菜单能同时出现在两种场景：
   8. 清理旧 Automator 服务
   9. 打开 "系统设置 → 隐私与安全 → 扩展 → 访达扩展"，提示用户勾选
 """
+import json
 import plistlib
 import shutil
 import subprocess
@@ -887,8 +888,13 @@ def write_swift_sources(services):
         d.mkdir(parents=True)
 
     # 菜单项 tuple 列表（Swift 字面量）：(标题, 脚本文件名, SF Symbol 名, 允许空目标)
+    # json.dumps 顺手把 " \ \n 等字符转成合法的 Swift 字符串字面量（JSON 和 Swift
+    # 对字符串转义规则一致）——避免以后有人在 service_defs() 里写带引号的标题。
+    def swift_str(s: str) -> str:
+        return json.dumps(s, ensure_ascii=False)
+
     menu_lines = ",\n        ".join(
-        f'("{title}", "{filename}", "{symbol}", {"true" if allows_empty else "false"})'
+        f'({swift_str(title)}, {swift_str(filename)}, {swift_str(symbol)}, {"true" if allows_empty else "false"})'
         for title, filename, _, symbol, allows_empty in services
     )
 
